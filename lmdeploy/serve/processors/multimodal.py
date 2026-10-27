@@ -400,15 +400,20 @@ class MultimodalProcessor:
             template_reasoning_effort = chat_template_kwargs.pop('reasoning_effort', None)
         else:
             chat_template_kwargs.pop('reasoning_effort', None)
-        prompt = chat_template.messages2prompt(prompt,
-                                               tools=tools,
-                                               reasoning_effort=template_reasoning_effort,
-                                               **chat_template_kwargs)
+        # Offload CPU-bound Jinja2 template rendering to a worker thread
+        # to avoid blocking the asyncio event loop on long prompts.
+        prompt = await asyncio.to_thread(chat_template.messages2prompt,
+                                         prompt,
+                                         tools=tools,
+                                         reasoning_effort=template_reasoning_effort,
+                                         **chat_template_kwargs)
         if prompt is None:
             raise ValueError(
                 f'You are using base template to handle chat task. Please specify a `--chat-template` name chosen from `lmdeploy list` if you want to use OpenAI messages input.'  # noqa
             )
-        input_ids = self.tokenizer.encode(prompt, add_bos=True)
+        # Offload CPU-bound tokenization to a worker thread.
+        # HuggingFace tokenizers are thread-safe (Rust-backed internally).
+        input_ids = await asyncio.to_thread(self.tokenizer.encode, prompt, add_bos=True)
         return {'prompt': prompt, 'input_ids': input_ids}
 
     async def _get_multimodal_prompt_input(self,
