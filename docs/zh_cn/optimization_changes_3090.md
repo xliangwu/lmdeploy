@@ -1,14 +1,37 @@
-# V166 / RTX 3090 优化改动简记
+# V166 / RTX 3090 优化修改方法与版本记录
 
-更新：2026-10-29。记录每项改动的原因、方法和文件；后续新增优化继续补在此文档中。
+更新：2026-10-29，Asia/Hong_Kong。保留原有“原因 → 方法 → 文件 → 验证与边界”，补齐分页 KV、连接上限、并发容量及 Nsight 口径。本次整理不修改运行服务。
 
-目标：**完整 SSE 响应 p95 <450ms、请求无失败，尽量提高 QPS**。适用验收环境为 V166、RTX 3090、单 GPU；已验证成绩来自充分预热、长输入、最多生成 3 token 的负载。
+当前目标：**完整请求 p95≤400ms、零失败、零中断，并提高 QPS/可承受并发**。历史 sp01→sp04 和分页 A/B 使用 `<450ms`，对应结果保留原门槛。适用环境为 V166、RTX 3090、单 GPU；成绩来自充分预热、长输入、最多生成 3 token 的负载。
+
+配套文档：[并发结果表与完整命令](concurrency_results_3090.md)、[Nsight 指标、命令与文件索引](nsight_analysis_3090.md)、[分页 KV 详细验证](paged_prefill_kv_validation.md)。
+
+**GitHub 发布与路径说明：**本次提交收录文档和并发结果 CSV。文中的仓库外 `../../../artifacts/`、`../../../docs/` 及 `/home/`、`/data/` 路径用于定位原测试服务器上的证据，GitHub 不提供这些文件的下载。未提交候选源码、Dockerfile 和测试脚本仍位于 `/home/yutao.he/lmdeploy-handoff-20261029/source`；相应章节描述服务器工作区状态，相关链接不代表这些候选已包含在本次提交或部署。复现命令依赖该服务器上的脚本、模型、数据和工具。
+
+## 本次采用的版本与当前状态
+
+“当前运行版本”固定为 **sp04**。当前源码工作区还保留未提交的输入编码缓存、短 query 与分页候选，不能将全量工作区等同于已运行镜像。
+
+| 项目 | 本轮整理时核验的状态 |
+| --- | --- |
+| 工作区 / 核验时 Git HEAD | `/home/yutao.he/lmdeploy-handoff-20261029/source`；`399e1cc5b3b8a5eba0f868136a900cb1e508d239`，另有未提交候选；本文提交后 HEAD 前移 |
+| 运行容器 / 镜像 tag | `lmdeploy-v166-qps450`；`lmdeploy_cu128:v0.18.0_sp04_qps450_20261028` |
+| 镜像 ID | `sha256:1c16cd8ac638bd49b06bb7dcc4853ba8132bbb66ccbc1a2af7cf74fb6531d84b` |
+| 运行 native SHA-256 | `92b2aab612a4c50341bc05bb1635c46802d98091940606eda1c751591e5f2347` |
+| 硬件 / 模型 | GPU0 RTX 3090、驱动570.144；V166 BF16，28层，12 Q / 2 KV heads，head_dim128，TP1 |
+| 服务参数 | 23333端口、session16384、batch16、cache_max_entry_count=0.9、prefix caching开启 |
+| 实际显式环境 | `TM_PREFILL_MAX_SPLITS=8`、`LMDEPLOY_CONTEXT_TOKEN_BUDGET=24576`、`LMDEPLOY_QWEN2_BYTELEVEL_TAIL=1` |
+| 未显式设置的环境 | `TM_PREFILL_PAGED_KV`、`TM_PREFILL_QUERY_TILE`、`LMDEPLOY_QWEN2_ENCODE_CACHE`；当前运行sp04无这些候选优化 |
+| 实际 nofile | soft1024 / hard524288；容量测试时新容器和客户端使用65536，尚未永久应用 |
+| 最后恢复 | 2026-10-29 17:23:20 +08:00；测试服务容器均已停止，两个构建容器仅运行sleep |
+
+运行快照见 [runtime-manifest.json](../../../artifacts/documentation-20261029/runtime-manifest.json)。本轮容量复核的 `batch16/客户端32` 为178.35 QPS、p95 220ms；`batch32/客户端48` 为176.10 QPS、p95 328ms，均零失败/中断。两个结果属于原sp04加测试资源配置，不是分页收益，也不表示该资源配置已部署。
 
 ## 先看代码来源
 
 ```text
 v0.18.0 发布提交 110965c7
-  ├─ main 后续 26 个提交 → 7998cdb → 我们的优化提交 65e8a7f
+  ├─ main 后续 26 个提交 → 7998cdb → 优化提交 65e8a7f → 文档提交399e1cc5 → 当前未提交候选
   └─ mentor 异步前处理提交 ccc395d → v0.18.0_optimize
 
 实际验收镜像：mentor sp01 → GPU 分片 r3 → CPU 优化与预算配置 sp04
@@ -87,6 +110,8 @@ prefill 局部下标：         | 0 1 2
 
 **边界：**这是与代码优化共同验收的配置改动，没有单项严格消融；不能将总收益全部归因于预算或某一个函数。
 
+**本轮补充的实际调度语义：**[context_token_resource.h](../../src/turbomind/models/llama/context_token_resource.h) 中，完整上下文长度为 `seq_len + inflight_new_tokens`；新增输入超过1 token或请求尚未active时，按完整上下文扣预算，已有active单token decode扣零。[scheduler.cc](../../src/turbomind/engine/scheduler.cc) 遇到当前请求无法放入预算会结束本轮接纳。约7345-token的请求即使命中约7318 token，仍按约7345计费，等长例子一轮可放3条prefill，4条需29380。实际混合长度会变化，不能将该例子当动态batch实测值。将服务batch16改为32不会放宽24576这一门槛；它是已确认的约束，不是已证明的唯一瓶颈。
+
 ## 5. 构建：保留 GEMM 静态注册对象
 
 **原因：**本次 CMake 构建曾丢失 GEMM 静态注册对象，导致原生模块可以 import、但 `Gemm.data_types()` 为空，模型无法启动。
@@ -105,17 +130,76 @@ prefill 局部下标：         | 0 1 2
 | 业务与解码验证 | [verify_prefill_split_kv.py](../../tools/verify_prefill_split_kv.py)、[verify_bytelevel_detokenize.py](../../tools/verify_bytelevel_detokenize.py)、[verify_service_token_stream.py](../../tools/verify_service_token_stream.py) | 区分跨运行生成比较与同一 token 流解码比较 |
 | 离线汇总 | [summarize_slo_runs.py](../../tools/summarize_slo_runs.py) | 读取已有 k6 JSON；不发推理请求 |
 
-## 结果口径与维护约定
+## 7. 输入编码缓存候选：复用重复片段的 token IDs
 
-| 同并发 A/B | 原 mentor 镜像 | sp04 组合优化 |
+**原因：**前缀KV命中不能避免输入文本重新编码；旧Nsight热16/32的编码线程CPU均值约13ms。
+
+**方法：**[tokenizer.py](../../lmdeploy/tokenizer.py) 挂接 [Qwen2ChunkEncoder](../../lmdeploy/tokenizer_chunk_cache.py)。仅在精确匹配的Qwen2 fast、NFC、BPE、正则和身份后处理条件下，沿安全换行边界切片；LRU默认2048条、按Python对象估算16MiB，锁保护缓存。编码配置改变，或带截断、填充及额外kwargs时回退原编码。只缓存输入token IDs，不缓存模型输出。
+
+**开关与文件：**源码 `LMDEPLOY_QWEN2_ENCODE_CACHE` 默认0；[Dockerfile.encode-cache](../../docker/Dockerfile.encode-cache) 显式设1。配套 [verify_encode_cache.py](../../tools/verify_encode_cache.py)、[summarize_current_runs.py](../../tools/summarize_current_runs.py) 来自交接，本轮保留未修改。
+
+**验证与边界：**交接记录包含真实输入、Unicode、回退、并发及淘汰检查；历史微测和服务结果见 [PERFORMANCE.md](../../../docs/PERFORMANCE.md)。本轮分页A/B与最新sp04容量测试均未启用编码缓存，不能将这些成绩归给该候选；当前sp04镜像未打包该模块。
+
+## 8. 短 query 候选：32行 prefill tile
+
+**原因：**高前缀命中时新增query很少，64行tile存在填充工作。
+
+**方法：**在 [attention_sm80_128.cu](../../src/turbomind/kernels/attention/kernel/attention_sm80_128.cu) 注册带形状分派的wrapper；显式 `TM_PREFILL_QUERY_TILE=32` 且满足SM86、CP1、受支持因果head128及 `max_q_len≤32` 时选择32行，其余保持64行。[impl_16816.h](../../src/turbomind/kernels/attention/impl_16816.h) 将Q共享内存行块改为 `min(CTA_Q×CTA_H,64)`，[registrar.h](../../src/turbomind/kernels/attention/registrar.h) 增加 `add_kernel` 支持wrapper。
+
+**文件：**上述3个源码、[test_prefill_split_kv.cu](../../src/turbomind/kernels/attention/test_prefill_split_kv.cu)、[Dockerfile.short-prefill](../../docker/Dockerfile.short-prefill)、[run_inference_optimized.sh](../../tools/run_inference_optimized.sh)。Dockerfile继承编码缓存镜像并开启32行，不能误当成只改分页的镜像。
+
+**验证与边界：**交接已有32/64边界和数值检查；本轮仅纠正旧测试资源输出为 `registry_base_linear_prefill`，防止把wrapper基类的线性属性当分页内核资源。源码默认64；最新sp04容量与分页A/B均固定64，不叠加32行分支收益。
+
+## 9. 分页 KV 候选：消除每层历史 KV 展平复制
+
+**原因：**旧sp04即使前缀命中约99.64%，每层仍分配连续 `tmp_kv` 并把整个历史KV复制进去。已有Nsight热16中FlattenKV占累计kernel时间8.09%；按28层、BF16、2 KV heads、head128和约7345-token输入推导，物化约210.6MB、读写合计约421.2MB/请求。这是逻辑字节估算，不是实际DRAM计数。
+
+```text
+原路径：ProcessKV写分页缓存 → FlattenKV复制全部历史 → 连续KV attention
+候选：  ProcessKV写分页缓存 ────────────────────────→ 页表直读 attention
+```
+
+**方法：**
+
+- [unified_attention_layer.cc](../../src/turbomind/models/llama/unified_attention_layer.cc) 在合格路径省略 `tmp_kv` 与 `invokeFlattenKV_v2_`，保留新增KV生产、K的RoPE以及原stream依赖。
+- [paged_prefill.h](../../src/turbomind/kernels/attention/paged_prefill.h) 统一生产者/消费者资格；开关 `TM_PREFILL_PAGED_KV=1`，默认关闭。范围限SM86、FP16/BF16、head128、Q12/KV2、page64、CP1、未量化、非MLA、因果；正常不支持场景保留线性路径。
+- [paged_prefill_iterator.h](../../src/turbomind/kernels/attention/paged_prefill_iterator.h) 按原 `block::Layout` 读取真实页表，预计算层/head字节偏移，tile恰好对应64-token页；逆序游标在第一页饱和以兼容流水线末尾预取，不假设物理页连续。
+- [attention.cu](../../src/turbomind/kernels/attention/attention.cu) 与wrapper把空连续指针作为明确分页标记；标记存在但参数失配时立即报错，禁止落入线性空指针读取。`TM_PREFILL_LOG_DISPATCH` 分别输出实际32/64分页内核资源。
+- 页表和缓存回收继续使用引擎既有 `inflight/ready/done` 生命周期约束；未改decode算法和缓存分配器。静态生命周期审查与双stream检查不代替取消/恢复/淘汰故障注入。
+
+**真实分页验证：**新增 [test_prefill_paged_kv.cu](../../src/turbomind/kernels/attention/test_prefill_paged_kv.cu) 及CMake target。候选连续指针置空、线性副本填NaN，使用乱序页表、非零层/表/混合batch偏移、尾页和只读共享前缀，覆盖ProcessKV、bias/RoPE、GQA、causal/window、split和双stream；另有独立FP64 CPU参考。FP16/BF16各18组形状/分片及各2组双stream，32/64行均通过；memcheck 0 errors；非法布局/非因果空连续指针fail-fast。最大分页/线性绝对差FP16为0.00012207、BF16为0.000488281。旧线性测试通过不计作分页证据。
+
+**构建与镜像：**[build_paged_prefill.sh](../../tools/build_paged_prefill.sh) 使用当前工作区独立 `build-paged-kv`，只复用第三方源码，不复用旧项目objects；[Dockerfile.paged-prefill](../../docker/Dockerfile.paged-prefill) 继承sp04、仅替换原生模块并校验hash。候选镜像 `lmdeploy_cu128:paged-kv-candidate-20261029`，ID `sha256:fa987b96aa211ec01b736a1d8e60fef3e6a954aa9d02113262301b24c6fe23a1`，native SHA-256 `3e1ac6ae9569d2fb482714acdb9a8ef17cbdc60df5a697f89521f5e63372116a`。当前仅保留构建产物，候选服务已停止。
+
+**性能与限制：**固定BF16 batch4/Q26/KV7345/split8/tile64算子链293.499→226.611μs，下降22.79%，不能换算为请求QPS；分页内核仍255寄存器/线程且有spill。单次服务A/B中16并发QPS+3.33%、32并发+0.19%基本持平，两版均有EMFILE，不能宣称饱和QPS提高。512条串行输出文本/finish_reason一致；后来并发16的两条差异已在原sp04复现，但未固定实际批次，不能扩大为全部并发输出等价。详见 [分页验证说明](paged_prefill_kv_validation.md) 与 [原始结果](../../../artifacts/paged-kv/RESULTS.md)。
+
+## 10. 连接资源与完整请求容量验收
+
+**原因：**旧服务soft nofile=1024，服务日志出现 `socket.accept: Too many open files`。本轮FD采样峰值1057，已超过旧上限；结束10秒后回到47，支持有限连接积累而非本轮持续泄漏的解释。
+
+**方法：**测试容器显式 `--ulimit nofile=65536:65536`，k6客户端同为65536；不同时改变keepalive或客户端连接模式。保留模型、tokenizer、context24576、split8、tile64，比较服务batch16/32和客户端并发32/48/56/64。原容器不改配置，临时容器结束后恢复原sp04。
+
+**文件与复现：**[benchmark_concurrency_point.sh](../../tools/benchmark_concurrency_point.sh) 保存全量k6 summary/log，交叉检查成功数、iterations、SSE done和终态中断，并按独立 `p95≤400` 判定；[search_concurrency_400.sh](../../tools/search_concurrency_400.sh) 支持 `VARIANT=sp04`、新报告目录/容器后缀及退出恢复；[confirm_sp04_concurrency.sh](../../tools/confirm_sp04_concurrency.sh) 复用已核验的batch32容器作3分钟确认。[accept_paged_prefill.sh](../../tools/accept_paged_prefill.sh) 属于较早的分页450ms固定A/B，不能替代400ms容量测试。具体部署、预热和各档命令见 [并发结果与命令](concurrency_results_3090.md)。
+
+**结果与边界：**5个90秒探索点、2个3分钟确认点共143,424条正式请求，失败/中断均0；通过点32/48的p95分别220/328ms，更高56/64未通过。QPS约180形成平台，不因更多在途请求同比提高。48是本轮最高已通过档，不是未测整数并发或生产突发的硬上限；p99和最大值可高于400ms。当前服务仍是batch16、nofile1024，测试配置未永久部署。
+
+## 11. Nsight 指标口径与文件维护
+
+本次仅整理既有Systems/Compute证据，未重新采集。热16/32的SM Active为74.55%/74.66%，属于原sp04的稳态窗口；r3旧记录67.32%属于另一阶段；本轮nvidia-smi GPU Util 100%也不是同一个指标。热16窗口从phase36.49秒缩到首末kernel30.06秒，再各去掉1秒得到28.06秒；窗口内部等待和空隙仍计入。正式完整请求QPS/p95没有进行这项裁剪。
+
+原始 `.nsys-rep`、SQLite、`.ncu-rep` 都保留在 `/home/yutao.he/lmdeploy-sp04-ns-20261029/`，大文件仅建立索引，不复制进源码。NCU仅保存4个辅助kernel，缺少attention/GEMM的stall和achieved occupancy；Systems有部分事件可能不完整告警。指标表、CPU阶段、kernel归因、历史采集命令、只读分析命令、工具版本及全部路径见 [Nsight整理](nsight_analysis_3090.md)。
+
+## 历史结果口径与维护约定
+
+| 历史同并发 A/B（slo_load.js） | 原 mentor 镜像 | sp04 组合优化 |
 | --- | --- | --- |
 | 16 VU，3 分钟 | 79.43 QPS，p95 264ms | 170.03 QPS，p95 122ms |
 | 32 VU，3 分钟 | 80.86 QPS，p95 486ms，p99 632ms | 167.07 QPS，p95 389.05ms，p99 793ms |
 
 两版使用同一 `slo_load.js`、同一 5000 条数据，各自先完成 5000 次预热；正式 A/B 均零请求失败。`slo_load.js` 在测试目录内，属于测量工具：固定排列、完整 SSE 计时和成功检查，与原 `test.js` 的随机抽样等逻辑不同。170 QPS 不能直接当作原 `test.js` 历史截图的复测结果。
 
-仓库中的[完整验收记录](qps450_3090.md)和[GPU 实施记录](prefill_split_kv_3090.md)保留历史证据。原始结果在本地 `D:/aispeech/reports/lmdeploy-qps450-20261028`，开发机 `/home/yutao.he/lmdeploy-qps450-20261028`；源码在开发机 `/home/yutao.he/lmdeploy-prefill-splitkv`。
+仓库中的[历史450ms验收记录](qps450_3090.md)和[GPU实施记录](prefill_split_kv_3090.md)保留历史证据。原始旧结果在本地 `D:/aispeech/reports/lmdeploy-qps450-20261028`、开发机 `/home/yutao.he/lmdeploy-qps450-20261028`；旧源码 `/home/yutao.he/lmdeploy-prefill-splitkv` 保留为来源，当前工作区为 `/home/yutao.he/lmdeploy-handoff-20261029/source`。最新400ms结果在 `artifacts/concurrency-400-resumed-20261029/`，使用test.measured.js和nofile65536，不能与旧表直接计算单项收益。
 
-本次代码已于 2026-10-29 提交为 `65e8a7f`，本地与开发机同一提交，尚未推送 GitHub；历史报告内“尚未提交”等文字属于当时快照。本文不宣称服务持续运行，现场容器状态需要另查。
+历史优化代码提交为 `65e8a7f`，后续文档提交为 `399e1cc5`；本次核验基于该 HEAD 的工作区快照。本次提交仅收录文档和 CSV，分页等候选代码继续保留为未提交改动。运行状态表是本次核验快照，不保证之后持续不变；复核时应同时检查镜像ID、原生模块hash、启动参数与环境，不能只看Git HEAD或镜像tag。
 
 后续每项改动沿用“**原因 → 方法/示意 → 文件 → 验证与边界**”记录；修改开关、适用范围或镜像组成时同步更新。尚未完成的字节边界检查、更长解码覆盖及逐项消融，不能记成已完成成果。
