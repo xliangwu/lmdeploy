@@ -17,6 +17,11 @@ target_link_libraries(attention PUBLIC $<LINK_LIBRARY:WHOLE_ARCHIVE,attention_ke
 target_link_libraries(attention PRIVATE nvidia::cutlass::cutlass)
 
 if (BUILD_TEST)
+    add_executable(test_prefill_split_kv test_prefill_split_kv.cu)
+    target_compile_options(test_prefill_split_kv PRIVATE
+        --generate-line-info -O3 -use_fast_math --expt-relaxed-constexpr)
+    target_link_libraries(test_prefill_split_kv PRIVATE attention core cuda_utils fmt::fmt CUDA::cudart)
+
     target_compile_options(attention PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-v --generate-line-info>)
 

@@ -1,0 +1,12 @@
+ARG BASE_IMAGE=lmdeploy_cu128:v0.18.0_sp01
+FROM ${BASE_IMAGE}
+ARG SOURCE_REV
+ARG PATCH_SHA256
+LABEL org.opencontainers.image.revision="${SOURCE_REV}" \
+      ai.aispeech.prefill-split-kv.patch-sha256="${PATCH_SHA256}" \
+      ai.aispeech.prefill-split-kv.scope="TurboMind SM86 TP1; mentor Python preprocessing retained"
+COPY runtime/ /opt/py3/lib/python3.12/site-packages/lmdeploy/turbomind/
+# 驱动由 GPU 容器运行时注入；构建阶段检查文件，导入验证在 --gpus 容器中执行。
+RUN test -s /opt/py3/lib/python3.12/site-packages/lmdeploy/turbomind/_turbomind.cpython-312-x86_64-linux-gnu.so
+ENTRYPOINT ["/opt/py3/bin/lmdeploy"]
+CMD ["--help"]

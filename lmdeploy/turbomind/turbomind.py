@@ -1,4 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+# 作用：TurboMind 服务接口；可选 LMDEPLOY_CONTEXT_TOKEN_BUDGET 控制每轮上下文预算。
+# 示例：LMDEPLOY_CONTEXT_TOKEN_BUDGET=24576 lmdeploy serve api_server /models/V166_mindspeed_mg2hf
 
 import asyncio
 import copy
@@ -30,6 +32,19 @@ logger = get_logger('lmdeploy')
 MAX_LOGPROBS = 1024
 _FP32_MAMBA_SSM_DTYPE = os.getenv('LMDEPLOY_FP32_MAMBA_SSM_DTYPE', '0') == '1'
 
+
+def _resolve_context_token_budget(value: str | None, session_len: int, max_batch_size: int) -> int:
+    """解析显式上下文预算；未设置保留原默认，禁止小于单请求上限或超过整批容量。"""
+    if value is None:
+        return 0
+    try:
+        budget = int(value)
+    except ValueError as error:
+        # 错误参数应在加载权重前失败，不能静默退回未优化配置。
+        raise ValueError('LMDEPLOY_CONTEXT_TOKEN_BUDGET must be an integer') from error
+    if not session_len or not max_batch_size or not session_len <= budget <= session_len * max_batch_size:
+        raise ValueError('LMDEPLOY_CONTEXT_TOKEN_BUDGET must be between session_len and session_len * max_batch_size')
+    return budget
 
 def _construct_stop_or_bad_words(words: list[int] = None):
     if words is None or len(words) == 0:
@@ -245,6 +260,9 @@ class TurboMind:
         ec.max_batch_size = engine_config.max_batch_size
         ec.max_prefill_token_num = engine_config.max_prefill_token_num
         ec.session_len = engine_config.session_len
+        # 显式预算仅影响批次调度，不改变单个请求的 session_len 或输入内容。
+        ec.max_context_token_num = _resolve_context_token_budget(
+            os.getenv('LMDEPLOY_CONTEXT_TOKEN_BUDGET'), engine_config.session_len, engine_config.max_batch_size)
         ec.cache_max_block_count = engine_config.cache_max_entry_count
         ec.cache_chunk_size = engine_config.cache_chunk_size
         ec.enable_prefix_caching = engine_config.enable_prefix_caching

@@ -1,5 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+# 作用：分词与流式反分词；可选 Qwen2 ByteLevel 尾部状态优化，其他 tokenizer 保持原路径。
+# 验证示例：python tools/verify_bytelevel_detokenize.py --help
 import json
+import os
 import os.path as osp
 from collections import deque
 from collections.abc import Sequence
@@ -49,6 +52,13 @@ class HuggingFaceTokenizer:
         self.logger = get_logger('lmdeploy')
         self.model = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
         self._prefix_space_tokens = None
+        # 只对已验证的 Transformers Qwen2 fast + ByteLevel 解码器启用，保留环境开关用于回退。
+        decoder = getattr(getattr(self.model, 'backend_tokenizer', None), 'decoder', None)
+        self._use_bytelevel_tail = (
+            os.getenv('LMDEPLOY_QWEN2_BYTELEVEL_TAIL', '0') == '1'
+            and type(self.model).__name__ in ('Qwen2Tokenizer', 'Qwen2TokenizerFast')
+            and type(self.model).__module__.startswith('transformers.models.qwen2.')
+            and self.model.is_fast and type(decoder).__name__ == 'ByteLevel')
 
         if self.model.eos_token_id is None:
             generation_config_file = osp.join(model_dir, 'generation_config.json')
@@ -263,6 +273,25 @@ class HuggingFaceTokenizer:
         else:
             return ''.join(sub_texts)
 
+    def _initial_detokenize_tokens(self, input_ids: Sequence[int], ids_offset: int,
+                                   skip_special_tokens: bool) -> list[str]:
+        """构造首次解码前缀；ByteLevel 只需包含完整尾部 UTF-8 上下文，其他情况走原路径。"""
+        if not self._use_bytelevel_tail:
+            return self.model.convert_ids_to_tokens(input_ids[:ids_offset],
+                                                    skip_special_tokens=skip_special_tokens)
+        # ByteLevel 独立映射 token 字符到字节再做 UTF-8 解码；前缀起点影响最多一个 4 字节字符。
+        # 至少保留 8 个非空 token，让被截断起点的影响留在会相减的共同前缀内；不裁剪生成内容。
+        span = 16
+        while True:
+            begin = max(0, ids_offset - span)
+            tokens = self.model.convert_ids_to_tokens(input_ids[begin:ids_offset],
+                                                      skip_special_tokens=skip_special_tokens)
+            tokens = tokens or []
+            if begin == 0 or sum(bool(token) for token in tokens) >= 8:
+                return tokens
+            # 大量被过滤的特殊 token 或空 token 时向前扩展，直到具有足够实际字节上下文。
+            span *= 2
+
     # Based on
     # https://github.com/vllm-project/vllm/blob/v0.2.7/vllm/transformers_utils/tokenizer.py#L105-L165
     def detokenize_incrementally(self,
@@ -298,8 +327,12 @@ class HuggingFaceTokenizer:
             # Please notice that in VLLM, indexes are detokenized one by one
             # while in LMDeploy, every turn, the detokenized indexes length
             # can be different.
-            prev_tokens = tokenizer.convert_ids_to_tokens(all_input_ids[:ids_offset],
-                                                          skip_special_tokens=skip_special_tokens)
+            # 自定义非零前缀状态可能要求完整 token 索引，不能压缩。
+            if prefix_offset == 0 and read_offset == 0:
+                prev_tokens = self._initial_detokenize_tokens(all_input_ids, ids_offset, skip_special_tokens)
+            else:
+                prev_tokens = tokenizer.convert_ids_to_tokens(all_input_ids[:ids_offset],
+                                                              skip_special_tokens=skip_special_tokens)
             # `convert_ids_to_tokens` returns None for out-of-range token_id
             prev_tokens = prev_tokens or []
             prev_tokens = [x for x in prev_tokens if x is not None] if None in prev_tokens else prev_tokens

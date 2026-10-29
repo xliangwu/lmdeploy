@@ -108,6 +108,12 @@ private:
     Tensor_<float> partial_ML_;
     Tensor_<int>   split_cnt_;
 
+    // prefill 与 decode 可在两个 stream 并发，分片中间结果必须使用独立存储。
+    int            prefill_max_splits_{kMaxKVSplits};
+    Tensor_<float> prefill_partial_O_;
+    Tensor_<float> prefill_partial_ML_;
+    Tensor_<int>   prefill_split_cnt_;
+
     Buffer_<float> rope_base_buf_;
     Buffer_<int>   mrope_default_buf_;
 
