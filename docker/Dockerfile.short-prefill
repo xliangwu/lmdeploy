@@ -1,0 +1,11 @@
+# 作用：在编码缓存镜像上替换已验证的原生模块，为SM86短query启用32行prefill；其他输入仍用64行。
+ARG BASE_IMAGE=lmdeploy_cu128:v0.18.0_sp05_encodecache_20261029
+FROM ${BASE_IMAGE}
+ARG NATIVE_SHA256
+ARG PATCH_SHA256
+LABEL ai.aispeech.short-prefill.native-sha256="${NATIVE_SHA256}" \
+      ai.aispeech.short-prefill.patch-sha256="${PATCH_SHA256}" \
+      ai.aispeech.short-prefill.scope="SM86, TP1, causal head128, max_q_len<=32; otherwise original64"
+COPY _turbomind.cpython-312-x86_64-linux-gnu.so /opt/py3/lib/python3.12/site-packages/lmdeploy/turbomind/
+ENV TM_PREFILL_QUERY_TILE=32
+RUN test -s /opt/py3/lib/python3.12/site-packages/lmdeploy/turbomind/_turbomind.cpython-312-x86_64-linux-gnu.so

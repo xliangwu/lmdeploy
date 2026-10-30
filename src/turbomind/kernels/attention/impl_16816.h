@@ -66,9 +66,11 @@ struct Impl<MMA_16816, T_, T_, CTA_H_, CTA_Q_, CTA_S_, WARP_H, WARP_Q, WARP_S, H
 
     static_assert(sizeof(FragS) / 2 == sizeof(FragP));
 
+    // 小query块的Q共享内存行块必须随之缩小；原有64行及以上布局保持逐项相同。
+    static constexpr int kSmemQRows = CTA_Q * CTA_H < 64 ? CTA_Q * CTA_H : 64;
     using SmemLayoutQ = std::conditional_t<HeadDim % 128 == 0,
-                                           SmemLayoutV2<CTA_Q * CTA_H, HeadDim, 64, 128, Swizzle<3, 3, 4>>,
-                                           SmemLayoutV2<CTA_Q * CTA_H, HeadDim, 64, 64, Swizzle<3, 3, 3>>>;
+                                           SmemLayoutV2<CTA_Q * CTA_H, HeadDim, kSmemQRows, 128, Swizzle<3, 3, 4>>,
+                                           SmemLayoutV2<CTA_Q * CTA_H, HeadDim, kSmemQRows, 64, Swizzle<3, 3, 3>>>;
     using SmemLayoutK = std::conditional_t<HeadDim % 128 == 0,
                                            SmemLayoutV2<CTA_S, HeadDim, 16, 128, Swizzle<3, 3, 4>>,
                                            SmemLayoutV2<CTA_S, HeadDim, 16, 64, Swizzle<3, 3, 3>>>;

@@ -21,6 +21,8 @@ English | [简体中文](README_zh-CN.md) | [日本語](README_ja.md)
 
 ______________________________________________________________________
 
+This branch contains the full V166 / RTX 3090 optimization source, tests, and tooling. See the [optimization branch guide](docs/zh_cn/v166_3090_optimized.md) for defaults, validation scope, and reproduction dependencies.
+
 ## Latest News 🎉
 
 <details open>

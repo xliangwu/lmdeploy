@@ -60,6 +60,13 @@ class HuggingFaceTokenizer:
             and type(self.model).__module__.startswith('transformers.models.qwen2.')
             and self.model.is_fast and type(decoder).__name__ == 'ByteLevel')
 
+        # 输入片段编码缓存为独立开关；不匹配的tokenizer会自动保留原始编码行为。
+        self._chunk_encoder = None
+        if os.getenv('LMDEPLOY_QWEN2_ENCODE_CACHE', '0') == '1':
+            from lmdeploy.tokenizer_chunk_cache import Qwen2ChunkEncoder
+            if getattr(self.model, 'is_fast', False):
+                self._chunk_encoder = Qwen2ChunkEncoder(self.model)
+
         if self.model.eos_token_id is None:
             generation_config_file = osp.join(model_dir, 'generation_config.json')
             if osp.exists(generation_config_file):
@@ -211,7 +218,9 @@ class HuggingFaceTokenizer:
         Returns:
             list[int]: token ids.
         """
-        encoded = self.model.encode(s, add_special_tokens=add_special_tokens, **kwargs)
+        # 仅复用输入token化的中间结果；模型仍接收完整且顺序不变的token IDs。
+        encoder = self._chunk_encoder or self.model
+        encoded = encoder.encode(s, add_special_tokens=add_special_tokens, **kwargs)
         if not add_bos:
             # in the middle of a session
             if len(encoded) and encoded[0] == self.bos_token_id:

@@ -1,20 +1,20 @@
 # V166 / RTX 3090 优化修改方法与版本记录
 
-更新：2026-10-29，Asia/Hong_Kong。保留原有“原因 → 方法 → 文件 → 验证与边界”，补齐分页 KV、连接上限、并发容量及 Nsight 口径。本次整理不修改运行服务。
+实验记录：2026-10-29，Asia/Hong_Kong；完整源码发布说明更新于2026-10-30。保留原有“原因 → 方法 → 文件 → 验证与边界”，补齐分页 KV、连接上限、并发容量及 Nsight 口径。源码整理不修改运行服务。
 
 当前目标：**完整请求 p95≤400ms、零失败、零中断，并提高 QPS/可承受并发**。历史 sp01→sp04 和分页 A/B 使用 `<450ms`，对应结果保留原门槛。适用环境为 V166、RTX 3090、单 GPU；成绩来自充分预热、长输入、最多生成 3 token 的负载。
 
-配套文档：[并发结果表与完整命令](concurrency_results_3090.md)、[Nsight 指标、命令与文件索引](nsight_analysis_3090.md)、[分页 KV 详细验证](paged_prefill_kv_validation.md)。
+配套文档：[完整源码入口与构建说明](v166_3090_optimized.md)、[并发结果表与完整命令](concurrency_results_3090.md)、[Nsight 指标、命令与文件索引](nsight_analysis_3090.md)、[分页 KV 详细验证](paged_prefill_kv_validation.md)。
 
-**GitHub 发布与路径说明：**本次提交收录文档和并发结果 CSV。文中的仓库外 `../../../artifacts/`、`../../../docs/` 及 `/home/`、`/data/` 路径用于定位原测试服务器上的证据，GitHub 不提供这些文件的下载。未提交候选源码、Dockerfile 和测试脚本仍位于 `/home/yutao.he/lmdeploy-handoff-20261029/source`；相应章节描述服务器工作区状态，相关链接不代表这些候选已包含在本次提交或部署。复现命令依赖该服务器上的脚本、模型、数据和工具。
+**GitHub 发布与路径说明：**`perf/v166-3090-optimized` 收录完整仓库源码、历史优化、当前输入编码缓存/短 query/分页 KV 候选、测试、Dockerfile、辅助脚本及文档/CSV。先前 `7b234c4` 仅提交文档，这是历史发布边界。文中的仓库外 `../../../artifacts/`、`../../../docs/` 及 `/home/`、`/data/` 路径用于定位原测试服务器上的证据，GitHub 不提供这些大报告、模型、私有输入、原始日志和外部工具。候选随源码发布不表示已部署或新增验收通过；复现仍需匹配工具链、基础镜像、模型和工作负载。
 
 ## 本次采用的版本与当前状态
 
-“当前运行版本”固定为 **sp04**。当前源码工作区还保留未提交的输入编码缓存、短 query 与分页候选，不能将全量工作区等同于已运行镜像。
+“当前运行版本”固定为 **sp04**。完整源码分支包含输入编码缓存、短 query 与分页候选，源码默认不开启这些候选；全量源码不等同于已运行镜像。专用候选 Dockerfile 的显式开关另见下文。
 
 | 项目 | 本轮整理时核验的状态 |
 | --- | --- |
-| 工作区 / 核验时 Git HEAD | `/home/yutao.he/lmdeploy-handoff-20261029/source`；`399e1cc5b3b8a5eba0f868136a900cb1e508d239`，另有未提交候选；本文提交后 HEAD 前移 |
+| 工作区 / 实验时 Git 基线 | `/home/yutao.he/lmdeploy-handoff-20261029/source`；2026-10-29 以 `399e1cc5b3b8a5eba0f868136a900cb1e508d239` 加当时未提交候选完成实验；现由 `perf/v166-3090-optimized` 收录，实验产物以当时源码快照和二进制哈希定位 |
 | 运行容器 / 镜像 tag | `lmdeploy-v166-qps450`；`lmdeploy_cu128:v0.18.0_sp04_qps450_20261028` |
 | 镜像 ID | `sha256:1c16cd8ac638bd49b06bb7dcc4853ba8132bbb66ccbc1a2af7cf74fb6531d84b` |
 | 运行 native SHA-256 | `92b2aab612a4c50341bc05bb1635c46802d98091940606eda1c751591e5f2347` |
@@ -31,15 +31,17 @@
 
 ```text
 v0.18.0 发布提交 110965c7
-  ├─ main 后续 26 个提交 → 7998cdb → 优化提交 65e8a7f → 文档提交399e1cc5 → 当前未提交候选
+  ├─ main 后续 26 个提交 → 7998cdb → 优化提交65e8a7f → 文档399e1cc5、7b234c4 → perf/v166-3090-optimized
   └─ mentor 异步前处理提交 ccc395d → v0.18.0_optimize
 
 实际验收镜像：mentor sp01 → GPU 分片 r3 → CPU 优化与预算配置 sp04
 ```
 
-mentor 已把模板渲染和输入 encode 改为 `await asyncio.to_thread(...)`，文件为 `lmdeploy/serve/processors/multimodal.py`。**这是 mentor 的已有优化，不计作我们新增的成果。**
+mentor 已把模板渲染和输入 encode 改为 `await asyncio.to_thread(...)`，文件为 [multimodal.py](../../lmdeploy/serve/processors/multimodal.py)，来源提交 `ccc395d`。**这是 mentor 的已有优化，不计作我们新增的成果。**
 
-2026-10-29 已核对：mentor 与 sp04 容器中的该文件都与 `v0.18.0_optimize` 一致。源码分支基于 `main`，没有合入这次异步提交，靠镜像继承保留它；因此“直接全量安装当前源码”不能默认等价于已测镜像。两条基础分支的 `src/turbomind/`、`tokenizer.py` 和 `turbomind.py` 原始内容一致。
+2026-10-29 已核对：mentor 与 sp04 容器中的该文件都与 `v0.18.0_optimize` 一致。当时源码分支基于 `main`，没有这两处异步调用，已测镜像通过继承保留它。2026-10-30完整源码整理时，将 `_get_text_prompt_input` 内模板渲染和encode的两处 `asyncio.to_thread` 最小移植到当前源码，保留main的空content处理、reasoning参数和其他逻辑，没有整文件回退或合并整个mentor分支。两条基础分支的 `src/turbomind/`、`tokenizer.py` 和 `turbomind.py` 原始内容一致。
+
+新增 [test_text_preprocess_async.py](../../tests/test_lmdeploy/test_text_preprocess_async.py)，实际导入当前源码，以受控模板/tokenizer验证5项CPU行为：模板和encode阻塞worker时事件循环仍响应、空content与参数传递、reasoning回退、无效模板拒绝及worker异常传播。5项均通过，不需要模型或GPU。此次完整源码组合没有新增服务A/B或GPU性能验收，仍不能默认等价于历史镜像的全量行为与成绩。
 
 ## 1. CPU：减少首次输出反分词的重复工作
 
@@ -200,6 +202,6 @@ prefill 局部下标：         | 0 1 2
 
 仓库中的[历史450ms验收记录](qps450_3090.md)和[GPU实施记录](prefill_split_kv_3090.md)保留历史证据。原始旧结果在本地 `D:/aispeech/reports/lmdeploy-qps450-20261028`、开发机 `/home/yutao.he/lmdeploy-qps450-20261028`；旧源码 `/home/yutao.he/lmdeploy-prefill-splitkv` 保留为来源，当前工作区为 `/home/yutao.he/lmdeploy-handoff-20261029/source`。最新400ms结果在 `artifacts/concurrency-400-resumed-20261029/`，使用test.measured.js和nofile65536，不能与旧表直接计算单项收益。
 
-历史优化代码提交为 `65e8a7f`，后续文档提交为 `399e1cc5`；本次核验基于该 HEAD 的工作区快照。本次提交仅收录文档和 CSV，分页等候选代码继续保留为未提交改动。运行状态表是本次核验快照，不保证之后持续不变；复核时应同时检查镜像ID、原生模块hash、启动参数与环境，不能只看Git HEAD或镜像tag。
+历史优化代码提交为 `65e8a7f`，后续文档提交为 `399e1cc5` 和仅文档的 `7b234c4`；2026-10-29 的核验基于 `399e1cc5` 加候选工作区快照。完整源码分支 `perf/v166-3090-optimized` 随后收录候选实现、测试和构建/验收脚本，不改写历史实验的源码或二进制身份。运行状态表是核验快照，不保证之后持续不变；复核时应同时检查镜像ID、原生模块hash、启动参数与环境，不能只看Git HEAD或镜像tag。
 
 后续每项改动沿用“**原因 → 方法/示意 → 文件 → 验证与边界**”记录；修改开关、适用范围或镜像组成时同步更新。尚未完成的字节边界检查、更长解码覆盖及逐项消融，不能记成已完成成果。

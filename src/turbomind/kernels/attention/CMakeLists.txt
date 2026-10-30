@@ -17,6 +17,12 @@ target_link_libraries(attention PUBLIC $<LINK_LIBRARY:WHOLE_ARCHIVE,attention_ke
 target_link_libraries(attention PRIVATE nvidia::cutlass::cutlass)
 
 if (BUILD_TEST)
+    # 使用真实分页布局验证新消费者，不能以线性 split-KV 测试替代此测试。
+    add_executable(test_prefill_paged_kv test_prefill_paged_kv.cu)
+    target_compile_options(test_prefill_paged_kv PRIVATE
+        --generate-line-info -O3 -use_fast_math --expt-relaxed-constexpr)
+    target_link_libraries(test_prefill_paged_kv PRIVATE attention core cuda_utils fmt::fmt CUDA::cudart)
+
     add_executable(test_prefill_split_kv test_prefill_split_kv.cu)
     target_compile_options(test_prefill_split_kv PRIVATE
         --generate-line-info -O3 -use_fast_math --expt-relaxed-constexpr)

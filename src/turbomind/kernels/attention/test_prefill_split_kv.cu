@@ -14,6 +14,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include "src/turbomind/kernels/attention/attention.h"
+#include "src/turbomind/kernels/attention/registry.h"
 
 namespace {
 
@@ -107,7 +108,11 @@ template<class T> struct Case {
         // 固定 workspace 容量；超出两路分片预算时覆盖原来的单分片回退行为。
         params.max_split_k = tokens <= WS/2 ? std::min(splits, WS/tokens) : 1;
         params.out = baseline ? reference.data : output.data;
+        // 仅在测试中以arch元数据80强制走原64行回退，实际仍在同一3090执行。
+        // 该字段在attention实现中只影响外层选路，不改变矩阵数值；候选保持86以覆盖短query32行路径。
+        params.arch = baseline ? 80 : 86;
         turbomind::dispatchAttention(params);
+        params.arch = 86;
         Check(cudaGetLastError());
     }
 
@@ -226,21 +231,40 @@ template<class T> void RunSuite(const char* dtype)
     std::cout << dtype << ": 96 shape/split checks + 8 concurrent checks passed\n";
 }
 
+void PrintKernelResources()
+{
+    // wrapper继承的是线性64行内核属性；实际短query/分页资源由分派日志单独报告。
+    // 这里仅展示registry基类元数据，不能作为实际分页资源或硬件实测occupancy证据。
+    turbomind::attention::AttnDesc desc{};
+    desc.mode = turbomind::attention::AttnDesc::kPrefill;
+    desc.head_dim = 128;
+    desc.data_type = turbomind::data_type_v<nv_bfloat16>;
+    desc.query_group_sz = 6;
+    desc.causal = true;
+    const auto* kernel = turbomind::attention::Registry::instance().Find(desc);
+    if (!kernel) throw std::runtime_error("BF16 prefill kernel not found");
+    const auto& info = kernel->info();
+    std::cout << "registry_base_linear_prefill warps=" << info.num_warps
+              << " registers_per_thread=" << info.attr.numRegs
+              << " max_active_ctas_per_sm=" << info.max_active_ctas
+              << " dynamic_smem=" << info.dynamic_smem_size << '\n';
+}
+
 void Benchmark()
 {
-    // 仅比较同一 kernel 的分片策略，不作为 HTTP/QPS 或端到端收益。
-    Case<nv_bfloat16> c({31},{12288},0);
-    cudaEvent_t begin, end;
-    Check(cudaEventCreate(&begin)); Check(cudaEventCreate(&end));
-    for (int splits : {1,8,16,128}) {
-        for (int i = 0; i < 5; ++i) c.Launch(splits);
+    // 按32/64行分派边界覆盖不同query长度；CUDA event仅作算子证据。
+    for (int qlen : {15, 31, 32, 33, 47, 63, 64, 65}) {
+        Case<nv_bfloat16> c({qlen},{12288},0);
+        cudaEvent_t begin, end;
+        Check(cudaEventCreate(&begin)); Check(cudaEventCreate(&end));
+        for (int i = 0; i < 5; ++i) c.Launch(8);
         Check(cudaEventRecord(begin,c.stream));
-        for (int i = 0; i < 50; ++i) c.Launch(splits);
+        for (int i = 0; i < 50; ++i) c.Launch(8);
         Check(cudaEventRecord(end,c.stream)); Check(cudaEventSynchronize(end));
         float ms{}; Check(cudaEventElapsedTime(&ms,begin,end));
-        std::cout << "BF16 Q31 KV12288 split_limit=" << splits << " mean_us=" << ms*1000/50 << '\n';
+        std::cout << "BF16 Q" << qlen << " KV12288 split_limit=8 mean_us=" << ms*1000/50 << '\n';
+        cudaEventDestroy(begin); cudaEventDestroy(end);
     }
-    cudaEventDestroy(begin); cudaEventDestroy(end);
 }
 } // namespace
 
@@ -248,6 +272,7 @@ int main(int argc, char** argv)
 {
     // 任一数值、越界或 CUDA 错误都返回非零，便于 CMake/CI 直接判定失败。
     try {
+        PrintKernelResources();
         RunSuite<half>("FP16"); RunSuite<nv_bfloat16>("BF16");
         if (argc>1 && std::string(argv[1])=="--benchmark") Benchmark();
         return 0;

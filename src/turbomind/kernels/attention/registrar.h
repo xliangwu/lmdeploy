@@ -19,6 +19,13 @@ public:
         // std::cout << "add kernel: " << to_string(kernels_.back()->desc()) << std::endl;
     }
 
+    template<class K>
+    void add_kernel()
+    {
+        // 允许注册具有形状分派逻辑的Kernel实现，既有add<T>路径保持不变。
+        kernels_.emplace_back(std::make_unique<K>());
+    }
+
     std::vector<std::unique_ptr<Kernel>> release()
     {
         return std::move(kernels_);

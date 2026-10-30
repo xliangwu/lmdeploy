@@ -1,0 +1,13 @@
+# 作用：继承 sp04，仅替换分页 KV 候选原生模块；分页默认关闭，由定向验收显式开启。
+# 构建前须确认本地 sp04 标签 ID 为下方固定值；验收脚本还会核对候选 RootFS 的基底层。
+# 示例：docker build --build-arg NATIVE_SHA256=<已验证的64位哈希> -t lmdeploy_cu128:paged-kv-candidate-20261029 build-paged-kv/image
+FROM lmdeploy_cu128:v0.18.0_sp04_qps450_20261028
+ARG NATIVE_SHA256
+LABEL ai.aispeech.paged-prefill.native-sha256="${NATIVE_SHA256}" \
+      ai.aispeech.paged-prefill.base-image-id="sha256:1c16cd8ac638bd49b06bb7dcc4853ba8132bbb66ccbc1a2af7cf74fb6531d84b" \
+      ai.aispeech.paged-prefill.scope="SM86, causal, head128, Q12/KV2, page64, CP1, unquantized"
+COPY _turbomind.cpython-312-x86_64-linux-gnu.so /opt/py3/lib/python3.12/site-packages/lmdeploy/turbomind/
+ENV TM_PREFILL_PAGED_KV=0 TM_PREFILL_QUERY_TILE=64
+# 不接受只有标签正确、实际 COPY 文件过期的镜像；哈希必须来自通过验证的同一原生模块。
+RUN test "$(printf %s "$NATIVE_SHA256" | wc -c)" -eq 64 && \
+    printf '%s  %s\n' "$NATIVE_SHA256" /opt/py3/lib/python3.12/site-packages/lmdeploy/turbomind/_turbomind.cpython-312-x86_64-linux-gnu.so | sha256sum -c -

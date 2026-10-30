@@ -1,4 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+# 作用：预处理文本与多模态请求；文本模板渲染及编码在线程池执行，避免阻塞异步服务。
+# 回归示例：python -m unittest discover -s tests/test_lmdeploy -p test_text_preprocess_async.py
 import asyncio
 from typing import Any, Literal
 
@@ -393,7 +395,7 @@ class MultimodalProcessor:
                                      reasoning_effort: Literal['low', 'medium', 'high', 'max'] | None = None,
                                      chat_template_kwargs: dict | None = None,
                                      **kwargs):
-        """Process text-only prompt and return prompt string and input_ids."""
+        """根据模板选项处理文本请求，在线程池渲染及编码后返回prompt和input_ids。"""
         # Change multimodal data to openai text messages
         if isinstance(prompt, list):
             prompt = [self.merge_message_content(msg) for msg in prompt]
@@ -410,15 +412,18 @@ class MultimodalProcessor:
             template_reasoning_effort = chat_template_kwargs.pop('reasoning_effort', None)
         else:
             chat_template_kwargs.pop('reasoning_effort', None)
-        prompt = chat_template.messages2prompt(prompt,
-                                               tools=tools,
-                                               reasoning_effort=template_reasoning_effort,
-                                               **chat_template_kwargs)
+        # 移植mentor提交ccc395d的既有优化：模板渲染离开事件循环，保留main的参数和输入校验。
+        prompt = await asyncio.to_thread(chat_template.messages2prompt,
+                                         prompt,
+                                         tools=tools,
+                                         reasoning_effort=template_reasoning_effort,
+                                         **chat_template_kwargs)
         if prompt is None:
             raise ValueError(
                 f'You are using base template to handle chat task. Please specify a `--chat-template` name chosen from `lmdeploy list` if you want to use OpenAI messages input.'  # noqa
             )
-        input_ids = self.tokenizer.encode(prompt, add_bos=True)
+        # 编码同样在线程池执行；等待完成后才返回完整token IDs，异常由原调用链传播。
+        input_ids = await asyncio.to_thread(self.tokenizer.encode, prompt, add_bos=True)
         return {'prompt': prompt, 'input_ids': input_ids}
 
     async def _get_multimodal_prompt_input(self,

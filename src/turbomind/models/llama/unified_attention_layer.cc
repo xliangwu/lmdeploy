@@ -38,6 +38,7 @@
 #include "src/turbomind/kernels/attention/attention.h"
 #include "src/turbomind/kernels/attention/decoding.h"
 #include "src/turbomind/kernels/attention/kv_cache_utils_v2.h"
+#include "src/turbomind/kernels/attention/paged_prefill.h"
 #include "src/turbomind/kernels/norm/rms_norm.h"
 
 #include "src/turbomind/macro.h"
@@ -483,7 +484,20 @@ Tensor UnifiedAttentionLayer::core_attention(Tensor& qkv, const ForwardParam& p,
 
     const bool is_mla = weights.is_mla();
 
-    Tensor tmp_kv{{local_kv_head_num, is_mla ? 1 : 2, d.prefill.k_sum + MAX_CTA_S, size_per_head}, dtype, device};
+    // 已缓存的历史KV仍在分页存储中；适配的prefill内核直接消费页表，省去每层全量读写副本。
+    const bool use_paged_kv = sizeof(T) == 2 && !is_mla && !is_warm_up_
+                             && attention::CanUsePagedPrefill(arch_,
+                                                              size_per_head,
+                                                              local_head_num,
+                                                              local_kv_head_num,
+                                                              engine_param_.cache_block_seq_len,
+                                                              engine_param_.attn_cp_size,
+                                                              quant_policy_,
+                                                              d.block_ptrs.data() && d.block_ptrs_offsets.data());
+    Tensor tmp_kv;
+    if (!use_paged_kv) {
+        tmp_kv = Tensor{{local_kv_head_num, is_mla ? 1 : 2, d.prefill.k_sum + MAX_CTA_S, size_per_head}, dtype, device};
+    }
 
     auto CreateParams = [&](int offset, AttentionData::Stat stat, int max_kv_splits, cudaStream_t stream) {
         AttentionParams<T> params{};
@@ -523,21 +537,22 @@ Tensor UnifiedAttentionLayer::core_attention(Tensor& qkv, const ForwardParam& p,
 
         TM_CHECK_LE(weights.cache_block_offset, INT_MAX);
 
-        // decode only
+        // decode与分页prefill共享页表；累计页数保持全批次绝对下标，层偏移以字节计。
         params.block_iter_params = BlockIteratorParams{(char**)d.block_ptrs.data(),  //
                                                        d.block_ptrs_offsets.data() + offset,
                                                        (int)weights.cache_block_offset,
                                                        engine_param_.cache_block_seq_len};
 
-        // prefill only
-        if (is_mla) {
+        // 分页直读时保留零初始化的空连续指针作为布局标记，dispatchAttention会拒绝不支持的
+        // 分页参数而非静默回退；decode本来就只消费block_iter_params。
+        if (!use_paged_kv && is_mla) {
             params.linear_iter_params = LinearIteratorParams{
                 tmp_kv.raw_data(),           // flattened KV
                 stat.k_sum * size_per_head,  // stride to next head
                 0                            // stride from K to V
             };
         }
-        else {
+        else if (!use_paged_kv) {
             params.linear_iter_params = LinearIteratorParams{
                 tmp_kv.raw_data(),               // flattened KV
                 stat.k_sum * size_per_head * 2,  // stride to next head
@@ -654,9 +669,11 @@ Tensor UnifiedAttentionLayer::core_attention(Tensor& qkv, const ForwardParam& p,
             invokeProcessKV_v2_(params);
             TM_CUDA_CHECK(cudaGetLastError());
 
-            /// TODO: skip flattening for `sm_80`
-            invokeFlattenKV_v2_(params, d.prefill.k_sum);
-            TM_CUDA_CHECK(cudaGetLastError());
+            // ProcessKV已完成K的RoPE和新增KV写入；这里仅在连续布局消费者需要时复制历史。
+            if (!use_paged_kv) {
+                invokeFlattenKV_v2_(params, d.prefill.k_sum);
+                TM_CUDA_CHECK(cudaGetLastError());
+            }
 
             dispatchAttention(params);
             TM_CUDA_CHECK(cudaGetLastError());

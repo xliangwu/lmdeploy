@@ -4,7 +4,7 @@
 
 配套文档：[修改方法与版本记录](optimization_changes_3090.md)、[最新并发结果与命令](concurrency_results_3090.md)。最新容量验收采用完整请求 p95≤400ms；下文450ms描述历史验收口径。
 
-文件索引中的绝对路径及仓库外链接指向原测试服务器；本次 GitHub 提交收录本文，原始报告和工具保留在服务器，未随文档上传。
+文件索引中的绝对路径及仓库外链接指向原测试服务器。`perf/v166-3090-optimized` 收录优化源码、候选、测试、构建/验收脚本及本文；Nsight 原始报告、仓库外分析工具和原始日志保留在服务器，不随 Git 上传。完整发布边界与构建入口见[完整源码说明](v166_3090_optimized.md)；本次源码发布未重新采集 Nsight。
 
 模型为 V166/Qwen2、BF16、28 层、12 个 query heads、2 个 KV heads、head_dim 128，单 RTX 3090、TP1。历史服务参数为 session length 16384、max batch size 16、prefix caching 开启、`cache-max-entry-count=0.9`、`TM_PREFILL_MAX_SPLITS=8`、`LMDEPLOY_CONTEXT_TOKEN_BUDGET=24576`。热32表示客户端并发32，服务 max batch size 仍为16。
 

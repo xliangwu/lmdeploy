@@ -1,0 +1,12 @@
+# 作用：在已验收sp04上加入输入片段编码缓存，保留原生GPU模块和其余服务代码。
+ARG BASE_IMAGE=lmdeploy_cu128:v0.18.0_sp04_qps450_20261028
+FROM ${BASE_IMAGE}
+ARG TOKENIZER_SHA256
+ARG CACHE_SHA256
+LABEL ai.aispeech.encode-cache.tokenizer-sha256="${TOKENIZER_SHA256}" \
+      ai.aispeech.encode-cache.module-sha256="${CACHE_SHA256}" \
+      ai.aispeech.encode-cache.scope="opt-in exact Qwen2 NFC and regex; 16MiB bounded input-token cache"
+COPY tokenizer.py /opt/py3/lib/python3.12/site-packages/lmdeploy/tokenizer.py
+COPY tokenizer_chunk_cache.py /opt/py3/lib/python3.12/site-packages/lmdeploy/tokenizer_chunk_cache.py
+ENV LMDEPLOY_QWEN2_ENCODE_CACHE=1
+RUN /opt/py3/bin/python -m py_compile /opt/py3/lib/python3.12/site-packages/lmdeploy/tokenizer.py /opt/py3/lib/python3.12/site-packages/lmdeploy/tokenizer_chunk_cache.py
