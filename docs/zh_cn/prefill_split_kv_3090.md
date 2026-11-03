@@ -1,5 +1,7 @@
 # V166 / RTX 3090 prefill split-KV 实施与部署记录
 
+> 2026-11-03 归档说明：历史测试结果和 Nsight 资料已统一迁入 `/home/yutao.he/lmdeploy-test-results/`，路径映射见 [归档索引](/home/yutao.he/lmdeploy-test-results/README.md)。下文旧路径记录当时现场，查找文件时按索引替换前缀。
+
 日期：2026-10-28，Asia/Hong_Kong。源码基于 xliangwu/lmdeploy 的 7998cdbaf713393b9155358a147226def2557467，工作分支 perf/prefill-split-kv。尚未提交或推送 GitHub。
 
 当前服务已于 2026-10-29 切换至 sp04；同16/32并发最终对比、ByteLevel解码优化及运行配置见 [最终验收记录](qps450_3090.md)。下文保留 r3 的历史部署与诊断信息。
