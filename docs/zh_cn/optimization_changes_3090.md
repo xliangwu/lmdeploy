@@ -18,7 +18,11 @@ v0.18.0 发布提交 110965c7
 
 mentor 已把模板渲染和输入 encode 改为 `await asyncio.to_thread(...)`，文件为 `lmdeploy/serve/processors/multimodal.py`。**这是 mentor 的已有优化，不计作我们新增的成果。**
 
-2026-10-29 已核对：mentor 与 sp04 容器中的该文件都与 `v0.18.0_optimize` 一致。源码分支基于 `main`，没有合入这次异步提交，靠镜像继承保留它；因此“直接全量安装当前源码”不能默认等价于已测镜像。两条基础分支的 `src/turbomind/`、`tokenizer.py` 和 `turbomind.py` 原始内容一致。
+2026-10-29 已核对：mentor 与 sp04 容器中的该文件都与 `v0.18.0_optimize` 一致。最初源码分支基于 `main`，没有合入这次异步提交，镜像通过继承保留它。
+
+2026-11-03 修正：从 mentor 分支 `v0.18.0_optimize` 的提交 `ccc395d19925e64d2052535e79b9dc6c481acfb6` 补回模板渲染和输入编码的两处 `await asyncio.to_thread(...)`，保留现有 sp04 两组优化及构建修复，不引入后续编码缓存、短 query tile 或分页 KV 候选。纯文本预处理函数与运行中 sp04 对比时，仅忽略注释及文档字符串；`tokenizer.py`、`turbomind.py` 的文件 SHA-256 与运行中 sp04 一致。
+
+这次采用补回改动，不重写分支基础历史：当前分支仍含 `main` 的其他上游更新。`multimodal.py` 整个文件与历史镜像仍存在工具消息空 content 处理、多模态类型校验及模板准备的上游差异。因此核心优化已补齐，但不能把当前源码全量构建称为历史 sp04 镜像的逐文件复刻，也不能直接沿用历史性能数字作为新构建的验收结果。此次没有构建、部署或压测，运行中 sp04 保持不变。
 
 ## 1. CPU：减少首次输出反分词的重复工作
 

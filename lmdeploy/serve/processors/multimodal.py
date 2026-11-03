@@ -1,4 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+# 多模态请求预处理；文本模板渲染和输入编码在线程中执行，避免阻塞事件循环。
+# 语法检查示例：python3 -m py_compile lmdeploy/serve/processors/multimodal.py
 import asyncio
 from typing import Any, Literal
 
@@ -393,7 +395,7 @@ class MultimodalProcessor:
                                      reasoning_effort: Literal['low', 'medium', 'high', 'max'] | None = None,
                                      chat_template_kwargs: dict | None = None,
                                      **kwargs):
-        """Process text-only prompt and return prompt string and input_ids."""
+        """处理纯文本 prompt；根据模板和适配器生成文本，返回 prompt 与 input_ids。"""
         # Change multimodal data to openai text messages
         if isinstance(prompt, list):
             prompt = [self.merge_message_content(msg) for msg in prompt]
@@ -410,15 +412,18 @@ class MultimodalProcessor:
             template_reasoning_effort = chat_template_kwargs.pop('reasoning_effort', None)
         else:
             chat_template_kwargs.pop('reasoning_effort', None)
-        prompt = chat_template.messages2prompt(prompt,
-                                               tools=tools,
-                                               reasoning_effort=template_reasoning_effort,
-                                               **chat_template_kwargs)
+        # 长输入的模板渲染会占用 CPU，放到工作线程以避免阻塞事件循环。
+        prompt = await asyncio.to_thread(chat_template.messages2prompt,
+                                         prompt,
+                                         tools=tools,
+                                         reasoning_effort=template_reasoning_effort,
+                                         **chat_template_kwargs)
         if prompt is None:
             raise ValueError(
                 f'You are using base template to handle chat task. Please specify a `--chat-template` name chosen from `lmdeploy list` if you want to use OpenAI messages input.'  # noqa
             )
-        input_ids = self.tokenizer.encode(prompt, add_bos=True)
+        # 将输入编码交给工作线程；沿用 mentor 对 Rust tokenizer 并发调用的处理。
+        input_ids = await asyncio.to_thread(self.tokenizer.encode, prompt, add_bos=True)
         return {'prompt': prompt, 'input_ids': input_ids}
 
     async def _get_multimodal_prompt_input(self,
