@@ -157,13 +157,13 @@ add_library(gemm2_core
 target_link_libraries(gemm2_core PRIVATE parser nvidia::cutlass::cutlass CUDA::cuda_driver)
 target_compile_definitions(gemm2_core PRIVATE TM_GEMM_HAS_SM90_MIXED=${GEMM2_HAS_SM90_MIXED})
 
-# Keep all registrations and place their archives before gemm2_core so the
-# kernel implementations' core symbols resolve in link order.
+# 保留静态注册对象并将 kernel archives 放在 core 前面；普通接口传递也保留 WHOLE_ARCHIVE。
+# CMake 3.28 在多个 DIRECT 注入链合并时可能丢失后续分组的链接属性，造成 dtype 列表为空。
 list(JOIN GEMM2_KERNEL_TARGETS "," GEMM2_KERNEL_TARGET_LIST)
-set_property(TARGET gemm2_core PROPERTY INTERFACE_LINK_LIBRARIES_DIRECT
-        "$<LINK_LIBRARY:WHOLE_ARCHIVE,${GEMM2_KERNEL_TARGET_LIST}>")
 add_library(gemm2 INTERFACE)
-target_link_libraries(gemm2 INTERFACE gemm2_core)
+target_link_libraries(gemm2 INTERFACE
+        "$<LINK_LIBRARY:WHOLE_ARCHIVE,${GEMM2_KERNEL_TARGET_LIST}>"
+        gemm2_core)
 
 target_compile_options(gemm2_core PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:
