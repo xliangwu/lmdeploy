@@ -539,7 +539,9 @@ struct AttentionUniversal {
             // Store actual split count, only used by separate reduction kernel
             for (int ti = threadIdx.x; ti < CTA_Q; ti += kWarpCount * WARP_SIZE) {
                 if (qi_begin + ti < qi_end) {
-                    params.split_cnt[qi_begin + ti] = split_idx ? split_idx + 1 : (params.cp_size > 1 ? 1 : 0);
+                    // 与 partial_O/partial_ML 保持相同的局部 query 下标，防止混合批次越界。
+                    params.split_cnt[qi_begin + ti - params.offset_q] =
+                        split_idx ? split_idx + 1 : (params.cp_size > 1 ? 1 : 0);
                 }
             }
         }

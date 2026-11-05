@@ -1,0 +1,12 @@
+# 继承已经验收的 GPU 分片版本，只替换语义等价的 Qwen2 ByteLevel 流式反分词路径。
+ARG BASE_IMAGE=lmdeploy_cu128:v0.18.0_sp02_splitkv_20261028_r3
+FROM ${BASE_IMAGE}
+ARG TOKENIZER_SHA256
+ARG INTERFACE_SHA256
+LABEL ai.aispeech.qwen2-bytelevel-tail.tokenizer-sha256="${TOKENIZER_SHA256}" \
+      ai.aispeech.qwen2-bytelevel-tail.interface-sha256="${INTERFACE_SHA256}" \
+      ai.aispeech.qwen2-bytelevel-tail.scope="opt-in Qwen2 fast ByteLevel; original path retained"
+COPY tokenizer.py /opt/py3/lib/python3.12/site-packages/lmdeploy/tokenizer.py
+COPY turbomind.py /opt/py3/lib/python3.12/site-packages/lmdeploy/turbomind/turbomind.py
+ENV LMDEPLOY_QWEN2_BYTELEVEL_TAIL=1
+RUN /opt/py3/bin/python -m py_compile /opt/py3/lib/python3.12/site-packages/lmdeploy/tokenizer.py
