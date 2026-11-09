@@ -99,3 +99,10 @@ proxy_config.yml
 # Claude Code local config
 CLAUDE.local.md
 .worktrees/
+
+# 本地文档与 agent 配置，不同步到远端
+/docs/
+AGENTS.md
+/.agents/
+/.codex/
+/.claude/
