@@ -172,6 +172,7 @@ class SubCliServe:
         ArgumentHelper.rope_scaling_factor(tb_group)
         ArgumentHelper.num_tokens_per_iter(tb_group)
         ArgumentHelper.max_prefill_iters(tb_group)
+        ArgumentHelper.max_context_token_num(tb_group)
         ArgumentHelper.async_(tb_group)
         ArgumentHelper.communicator(tb_group)
         ArgumentHelper.moe_a2a_backend(tb_group)
@@ -305,6 +306,7 @@ class SubCliServe:
                                                    cache_block_seq_len=args.cache_block_seq_len,
                                                    enable_prefix_caching=args.enable_prefix_caching,
                                                    max_prefill_token_num=args.max_prefill_token_num,
+                                                   max_context_token_num=args.max_context_token_num,
                                                    num_tokens_per_iter=args.num_tokens_per_iter,
                                                    max_prefill_iters=args.max_prefill_iters,
                                                    async_=args.async_,

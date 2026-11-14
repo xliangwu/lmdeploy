@@ -656,6 +656,15 @@ class ArgumentHelper:
                                    help='the max number of tokens per iteration during prefill')
 
     @staticmethod
+    def max_context_token_num(parser):
+        return parser.add_argument('--max-context-token-num',
+                                   type=int,
+                                   default=0,
+                                   help='the max total context tokens scheduled in one forward step, i.e. how '
+                                   'much KV context prefill/swap-in may be resident at once. Only used by the '
+                                   'TurboMind engine. 0 keeps the engine built-in default.')
+
+    @staticmethod
     def piecewise_cudagraph_max_tokens(parser):
         return parser.add_argument('--piecewise-cudagraph-max-tokens',
                                    type=int,

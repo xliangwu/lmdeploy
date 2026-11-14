@@ -354,6 +354,11 @@ class TurbomindEngineConfig:
             default version.
         max_prefill_token_num: the number of tokens each iteration during
             prefill, default to 8192
+        max_context_token_num: per-step budget of resident context tokens
+            for the TurboMind scheduler, i.e. the sum of the full context
+            lengths of the requests that must (re)load their KV cache in
+            one forward step. Ongoing decoding requests are not charged.
+            Keep 0 to use the engine built-in default, default to 0
         num_tokens_per_iter: the number of tokens processed in each
             forward pass. Working with `max_prefill_iters` enables the
             "Dynamic SplitFuse"-like scheduling
@@ -409,6 +414,7 @@ class TurbomindEngineConfig:
     download_dir: str | None = None
     revision: str | None = None
     max_prefill_token_num: int = 8192
+    max_context_token_num: int = 0
     num_tokens_per_iter: int = 0
     max_prefill_iters: int = 1
     async_: int = 1
@@ -438,6 +444,7 @@ class TurbomindEngineConfig:
         assert self.rope_scaling_factor >= 0, 'invalid rope_scaling_factor'
         assert self.max_prefill_token_num >= 0, \
             'invalid max_prefill_token_num'
+        assert self.max_context_token_num >= 0, 'invalid max_context_token_num'
         assert self.num_tokens_per_iter >= 0, 'invalid num_tokens_per_iter'
         assert self.cache_prompt in ('all', 'auto'), 'invalid cache_prompt'
         assert self.cache_generation in ('all', 'auto', 'none'), 'invalid cache_generation'

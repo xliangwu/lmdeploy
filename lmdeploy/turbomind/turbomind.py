@@ -31,6 +31,19 @@ MAX_LOGPROBS = 1024
 _FP32_MAMBA_SSM_DTYPE = os.getenv('LMDEPLOY_FP32_MAMBA_SSM_DTYPE', '0') == '1'
 
 
+def _resolve_context_token_budget(value: int, session_len: int, max_batch_size: int) -> int:
+    """Resolve the context token budget. 0 means to keep the engine's built-in default. The value must be between
+    session_len and session_len * max_batch_size.。"""
+    if not value:
+        return 0
+    
+    if session_len and max_batch_size and not session_len <= value <= session_len * max_batch_size:
+        raise ValueError('max_context_token_num must be between session_len and '
+                         f'session_len * max_batch_size, got {value}, '
+                         f'session_len={session_len}, max_batch_size={max_batch_size}')
+    return value
+
+
 def _construct_stop_or_bad_words(words: list[int] = None):
     if words is None or len(words) == 0:
         return None
@@ -245,6 +258,7 @@ class TurboMind:
         ec.max_batch_size = engine_config.max_batch_size
         ec.max_prefill_token_num = engine_config.max_prefill_token_num
         ec.session_len = engine_config.session_len
+        ec.max_context_token_num = _resolve_context_token_budget(engine_config.max_context_token_num,engine_config.session_len,engine_config.max_batch_size)
         ec.cache_max_block_count = engine_config.cache_max_entry_count
         ec.cache_chunk_size = engine_config.cache_chunk_size
         ec.enable_prefix_caching = engine_config.enable_prefix_caching
