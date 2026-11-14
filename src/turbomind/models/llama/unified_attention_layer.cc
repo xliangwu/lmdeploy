@@ -21,6 +21,7 @@
 
 #include "src/turbomind/engine/block.h"
 #include <algorithm>
+#include <cstdlib>
 #include <functional>
 #include <math.h>
 #include <numeric>
@@ -145,6 +146,15 @@ UnifiedAttentionLayer::UnifiedAttentionLayer(std::vector<AttentionWeight*> weigh
 {
     TM_CHECK_GE(weights.size(), 1);
 
+    // 允许同一构建中控制分片上限；1 保留未分片路径，便于数值回归和快速回退。
+    if (const char* value = std::getenv("TM_PREFILL_MAX_SPLITS")) {
+        char* end = nullptr;
+        const long splits = std::strtol(value, &end, 10);
+        TM_CHECK(end != value && *end == '\0' && splits >= 1 && splits <= kMaxKVSplits)
+            << "TM_PREFILL_MAX_SPLITS must be an integer in [1, 128]";
+        prefill_max_splits_ = static_cast<int>(splits);
+    }
+
     const auto dtype = engine.data_type;
 
     const int dtype_bits = byte_size(dtype, 8);
@@ -222,6 +232,14 @@ UnifiedAttentionLayer::UnifiedAttentionLayer(std::vector<AttentionWeight*> weigh
         split_cnt_  = Tensor_<int>({workspace_tokens}, kDEVICE);
 
         Clear(split_cnt_.buffer());
+
+        // 先覆盖单 CP rank 的常规 attention；保留 MLA、CP 与旧架构的原有路径。
+        if (prefill_max_splits_ > 1 && engine_param_.attn_cp_size == 1 && !w.is_mla() && arch_ >= 80) {
+            prefill_partial_O_  = Tensor_<float>({kMaxWorkspaceTokens, local_head_num, size_per_head}, kDEVICE);
+            prefill_partial_ML_ = Tensor_<float>({kMaxWorkspaceTokens, local_head_num, 2}, kDEVICE);
+            prefill_split_cnt_  = Tensor_<int>({kMaxWorkspaceTokens}, kDEVICE);
+            Clear(prefill_split_cnt_.buffer());
+        }
     }
 }
 
@@ -621,10 +639,18 @@ Tensor UnifiedAttentionLayer::core_attention(Tensor& qkv, const ForwardParam& p,
 
     if (d.prefill.n && !is_warm_up_) {
         const int offset = d.decode.n;
-        // We are executing prefill & decoding kernels concurrently, but only have 1 workspace
-        // disable split kv for prefill for now
+        // 不具备独立 workspace 的配置仍使用单分片，避免与 decode 并发写入。
         auto params = CreateParams(offset, d.prefill, 1, pf_stream);
         if constexpr (sizeof(T) == 2) {
+            // 每个 query 的部分结果需要 max_split_k 行；固定容量至少容纳两路才启用。
+            if (prefill_partial_O_ && params.token_num <= kMaxWorkspaceTokens / 2) {
+                params.max_split_k = std::min(kMaxWorkspaceTokens / params.token_num, prefill_max_splits_);
+                params.partial_O   = prefill_partial_O_.data();
+                params.partial_ML  = prefill_partial_ML_.data();
+                params.split_cnt   = prefill_split_cnt_.data();
+                // 混合批次的 query 使用全局下标，中间结果和 reduce 使用 prefill 局部下标。
+                params.offset_q = offset;
+            }
             invokeProcessKV_v2_(params);
             TM_CUDA_CHECK(cudaGetLastError());
 
